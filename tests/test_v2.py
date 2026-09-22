@@ -767,4 +767,5 @@ def test_v2_openapi_has_bearer_scheme_and_paths(client: TestClient) -> None:
     assert "ProntoAgenteV2ApiKey" in document["components"]["securitySchemes"]
     assert "/v2/agents" in document["paths"]
     assert "/v2/workflows/{workflow_id}/runs/dry-run" in document["paths"]
+    assert "/v2/workflows/{workflow_id}/runs/from-mail" in document["paths"]
     assert "/v2/runs/{run_id}/execute" in document["paths"]

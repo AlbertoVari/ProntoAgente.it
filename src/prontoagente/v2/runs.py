@@ -14,9 +14,18 @@ from prontoagente.config import Settings, get_settings
 from prontoagente.errors import ConflictError, NotFoundError
 from prontoagente.v2.auth import AuthContext
 from prontoagente.v2.connectors import m365_configured
+from prontoagente.v2.demo_connectors import (
+    CATALOG_VERSION,
+    PARSER_VERSION,
+    canonical_order,
+    parse_order_subject,
+    reconcile_order,
+    source_reference_hash,
+)
 from prontoagente.v2.models import (
     AgentVersion,
     ExecutionOperation,
+    OrderSourceClaim,
     OutboxEvent,
     Run,
     V2AuditEvent,
@@ -28,6 +37,7 @@ from prontoagente.v2.schemas import (
     ExecutionOperationResponse,
     RunApprovalRequest,
     RunDryRunRequest,
+    RunFromMailRequest,
     RunRejectionRequest,
     RunResponse,
     V2AuditEventResponse,
@@ -58,6 +68,7 @@ def run_body(run: Run) -> ResponseBody:
         target=run.target,
         payload=run.payload,
         approval_required=bool(run.workflow_snapshot["approval_required"]),
+        approval_eligible=run.approval_eligible,
         approved_by=run.approved_by,
         approved_at=_optional_utc(run.approved_at),
         rejected_by=run.rejected_by,
@@ -99,18 +110,22 @@ def _cas_run_status(
     run_id: str,
     expected_status: str,
     values: dict[str, Any],
+    require_approval_eligible: bool = False,
 ) -> bool:
     """Change state only if this request still owns the expected transition."""
 
+    predicates = [
+        Run.tenant_id == context.tenant_id,
+        Run.id == run_id,
+        Run.status == expected_status,
+    ]
+    if require_approval_eligible:
+        predicates.append(Run.approval_eligible.is_(True))
     result = cast(
         CursorResult[Any],
         session.execute(
             update(Run)
-            .where(
-                Run.tenant_id == context.tenant_id,
-                Run.id == run_id,
-                Run.status == expected_status,
-            )
+            .where(*predicates)
             .values(**values, updated_at=datetime.now(UTC))
             .execution_options(synchronize_session=False)
         ),
@@ -275,27 +290,9 @@ def _proposal_for(
     return summary, target, payload, proposal
 
 
-def create_dry_run(
-    session: Session,
-    context: AuthContext,
-    *,
-    workflow_id: str,
-    request: RunDryRunRequest,
-    idempotency_key: str,
-) -> tuple[int, ResponseBody]:
-    operation = "run.dry_run"
-    request_hash = _request_hash(
-        {"workflow_id": workflow_id, **request.model_dump(mode="json")}
-    )
-    replay = _find_replay(
-        session,
-        context,
-        operation=operation,
-        idempotency_key=idempotency_key,
-        request_hash=request_hash,
-    )
-    if replay is not None:
-        return replay
+def _published_stack(
+    session: Session, context: AuthContext, workflow_id: str
+) -> tuple[Workflow, WorkflowVersion, AgentVersion]:
     workflow = session.scalar(
         select(Workflow).where(
             Workflow.tenant_id == context.tenant_id, Workflow.id == workflow_id
@@ -324,9 +321,23 @@ def create_dry_run(
     )
     if agent_version is None:
         raise ConflictError("agent_version_unavailable", "pinned agent version is unavailable")
-    _validate_input_schema(workflow_version.input_schema, request.input)
-    summary, target, payload, proposal = _proposal_for(workflow_version, request.input)
-    run = Run(
+    return workflow, workflow_version, agent_version
+
+
+def _new_proposed_run(
+    context: AuthContext,
+    *,
+    workflow: Workflow,
+    workflow_version: WorkflowVersion,
+    agent_version: AgentVersion,
+    input_payload: dict[str, Any],
+    proposal: dict[str, Any],
+    summary: str,
+    target: str,
+    payload: dict[str, Any],
+    approval_eligible: bool = True,
+) -> Run:
+    return Run(
         id=str(uuid4()),
         tenant_id=context.tenant_id,
         workflow_id=workflow.id,
@@ -344,26 +355,90 @@ def create_dry_run(
             "version": agent_version.version,
             "definition": agent_version.definition,
         },
-        input_payload=request.input,
+        input_payload=input_payload,
         proposal=proposal,
         proposal_hash=sha256_digest(proposal),
         summary=summary,
         target=target,
         payload=payload,
         status="proposed",
+        approval_eligible=approval_eligible,
         created_by=context.principal_id,
     )
+
+
+def _stage_proposed_run(
+    session: Session,
+    context: AuthContext,
+    *,
+    run: Run,
+    workflow_version: WorkflowVersion,
+    idempotency_key: str,
+    audit_details: dict[str, Any] | None = None,
+) -> ResponseBody:
     session.add(run)
     session.flush()
+    audit_payload: dict[str, Any] = {
+        "proposal_hash": run.proposal_hash,
+        "workflow_version_id": workflow_version.id,
+    }
+    if audit_details is not None:
+        audit_payload.update(audit_details)
     _audit(
         session,
         context,
         run_id=run.id,
         event_type="run_proposed",
         idempotency_key=idempotency_key,
-        payload={"proposal_hash": run.proposal_hash, "workflow_version_id": workflow_version.id},
+        payload=audit_payload,
     )
-    body = run_body(run)
+    return run_body(run)
+
+
+def create_dry_run(
+    session: Session,
+    context: AuthContext,
+    *,
+    workflow_id: str,
+    request: RunDryRunRequest,
+    idempotency_key: str,
+) -> tuple[int, ResponseBody]:
+    operation = "run.dry_run"
+    request_hash = _request_hash(
+        {"workflow_id": workflow_id, **request.model_dump(mode="json")}
+    )
+    replay = _find_replay(
+        session,
+        context,
+        operation=operation,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+    if replay is not None:
+        return replay
+    workflow, workflow_version, agent_version = _published_stack(
+        session, context, workflow_id
+    )
+    _validate_input_schema(workflow_version.input_schema, request.input)
+    summary, target, payload, proposal = _proposal_for(workflow_version, request.input)
+    run = _new_proposed_run(
+        context,
+        workflow=workflow,
+        workflow_version=workflow_version,
+        agent_version=agent_version,
+        input_payload=request.input,
+        proposal=proposal,
+        summary=summary,
+        target=target,
+        payload=payload,
+    )
+    body = _stage_proposed_run(
+        session,
+        context,
+        run=run,
+        workflow_version=workflow_version,
+        idempotency_key=idempotency_key,
+    )
     return _commit_idempotent(
         session,
         context,
@@ -374,6 +449,178 @@ def create_dry_run(
         body=body,
         resource_id=run.id,
     )
+
+
+def create_run_from_mail(
+    session: Session,
+    context: AuthContext,
+    *,
+    workflow_id: str,
+    request: RunFromMailRequest,
+    idempotency_key: str,
+    settings: Settings | None = None,
+) -> tuple[int, ResponseBody]:
+    """Prepare a normal governed run from a strictly synthetic mail envelope."""
+
+    resolved_settings = settings or get_settings()
+    if (
+        not resolved_settings.enable_demo_connectors
+        or resolved_settings.app_env == "production"
+    ):
+        raise ConflictError(
+            "demo_connector_disabled",
+            "offline demo preparation is disabled in this environment",
+        )
+
+    operation = "run.from_mail"
+    request_hash = _request_hash(
+        {"workflow_id": workflow_id, **request.model_dump(mode="json")}
+    )
+    replay = _find_replay(
+        session,
+        context,
+        operation=operation,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+    )
+    if replay is not None:
+        return replay
+
+    envelope = request.envelope
+    source_ref_hash = source_reference_hash(
+        source_connector=envelope.source_connector,
+        message_id=envelope.message_id,
+        internet_message_id=envelope.internet_message_id,
+    )
+    existing_claim = session.scalar(
+        select(OrderSourceClaim).where(
+            OrderSourceClaim.tenant_id == context.tenant_id,
+            OrderSourceClaim.source_connector == envelope.source_connector,
+            OrderSourceClaim.source_ref_hash == source_ref_hash,
+        )
+    )
+    if existing_claim is not None:
+        raise ConflictError(
+            "order_source_already_claimed",
+            "this source message already prepared an order run",
+        )
+
+    workflow, workflow_version, agent_version = _published_stack(
+        session, context, workflow_id
+    )
+    if (
+        workflow_version.connector != "simulated_erp"
+        or workflow_version.action != "create_sales_order"
+        or not workflow_version.approval_required
+    ):
+        raise ConflictError(
+            "demo_workflow_incompatible",
+            "from-mail requires an approval-first simulated_erp/create_sales_order workflow",
+        )
+
+    parsed_order = parse_order_subject(envelope.subject)
+    order_payload = canonical_order(parsed_order)
+    _validate_input_schema(workflow_version.input_schema, order_payload)
+    reconciliation = reconcile_order(parsed_order)
+    provenance = {
+        "source_connector": envelope.source_connector,
+        "source_ref_hash": source_ref_hash,
+        "parser_version": PARSER_VERSION,
+        "catalog_version": CATALOG_VERSION,
+    }
+    summary = (
+        f"Prepare order {parsed_order.order_id}; "
+        f"offline reconciliation {reconciliation['outcome']}"
+    )
+    target = str(workflow_version.config.get("target", "simulated_erp"))
+    proposal = {
+        "schema_version": "2.0",
+        "preparation_type": "demo_mail_order_reconciliation",
+        "workflow_version_id": workflow_version.id,
+        "agent_version_id": workflow_version.agent_version_id,
+        "connector": workflow_version.connector,
+        "action": workflow_version.action,
+        "summary": summary,
+        "target": target,
+        "payload": order_payload,
+        "normalized_order": order_payload,
+        "reconciliation": reconciliation,
+        "provenance": provenance,
+    }
+    run = _new_proposed_run(
+        context,
+        workflow=workflow,
+        workflow_version=workflow_version,
+        agent_version=agent_version,
+        input_payload={
+            "normalized_order": order_payload,
+            "reconciliation": reconciliation,
+            "provenance": provenance,
+        },
+        proposal=proposal,
+        summary=summary,
+        target=target,
+        payload=order_payload,
+        approval_eligible=reconciliation["outcome"] == "MATCHED",
+    )
+    body = _stage_proposed_run(
+        session,
+        context,
+        run=run,
+        workflow_version=workflow_version,
+        idempotency_key=idempotency_key,
+        audit_details={
+            "preparation_type": "demo_mail_order_reconciliation",
+            "source": provenance,
+            "reconciliation_outcome": reconciliation["outcome"],
+        },
+    )
+    session.add(
+        OrderSourceClaim(
+            id=str(uuid4()),
+            tenant_id=context.tenant_id,
+            source_connector=envelope.source_connector,
+            source_ref_hash=source_ref_hash,
+            run_id=run.id,
+        )
+    )
+    _remember(
+        session,
+        context,
+        operation=operation,
+        idempotency_key=idempotency_key,
+        request_hash=request_hash,
+        status=201,
+        body=body,
+        resource_id=run.id,
+    )
+    try:
+        session.commit()
+    except IntegrityError as exc:
+        session.rollback()
+        replay = _find_replay(
+            session,
+            context,
+            operation=operation,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+        )
+        if replay is not None:
+            return replay
+        claimed = session.scalar(
+            select(OrderSourceClaim).where(
+                OrderSourceClaim.tenant_id == context.tenant_id,
+                OrderSourceClaim.source_connector == envelope.source_connector,
+                OrderSourceClaim.source_ref_hash == source_ref_hash,
+            )
+        )
+        if claimed is not None:
+            raise ConflictError(
+                "order_source_already_claimed",
+                "this source message already prepared an order run",
+            ) from exc
+        raise
+    return 201, body
 
 
 def approve_run(
@@ -399,6 +646,11 @@ def approve_run(
     _assert_integrity(run)
     if run.status != "proposed":
         raise ConflictError("invalid_state", "approval requires a proposed run")
+    if not run.approval_eligible:
+        raise ConflictError(
+            "approval_not_eligible",
+            "run contains reconciliation blockers and cannot be approved",
+        )
     if run.proposal_hash != request.proposal_hash:
         raise ConflictError("proposal_hash_mismatch", "proposal hash does not match")
     if not _cas_run_status(
@@ -411,6 +663,7 @@ def approve_run(
             "approved_by": context.principal_id,
             "approved_at": datetime.now(UTC),
         },
+        require_approval_eligible=True,
     ):
         session.rollback()
         replay = _find_replay(

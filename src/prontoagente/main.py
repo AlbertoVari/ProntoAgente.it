@@ -3,6 +3,7 @@
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from prontoagente.ai.routes import router as ai_router
 from prontoagente.api.routes import router
 from prontoagente.config import get_settings
 from prontoagente.errors import (
@@ -17,8 +18,10 @@ from prontoagente.v2.routes import router as v2_router
 def create_app() -> FastAPI:
     application = FastAPI(
         title="ProntoAgente ERP Workflow API",
-        version="0.2.0",
-        description="Tenant-scoped agent/workflow catalog and durable execution platform.",
+        version="0.3.0",
+        description=(
+            "Tenant-scoped workflow catalog, governed AI preparation, and durable execution."
+        ),
     )
 
     @application.exception_handler(ConflictError)
@@ -58,6 +61,7 @@ def create_app() -> FastAPI:
     if settings.app_env != "production" or settings.enable_legacy_v1:
         application.include_router(router, prefix="/v1")
     application.include_router(v2_router, prefix="/v2")
+    application.include_router(ai_router, prefix="/v2")
     return application
 
 

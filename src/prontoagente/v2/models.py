@@ -18,6 +18,7 @@ from sqlalchemy import (
     event,
     inspect,
     text,
+    true,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -256,6 +257,10 @@ class Run(Base):
             "AND rejection_reason IS NOT NULL)",
             name="ck_runs_decision_consistency",
         ),
+        CheckConstraint(
+            "approval_eligible OR status IN ('proposed', 'rejected')",
+            name="ck_runs_approval_eligible",
+        ),
         ForeignKeyConstraint(
             ["tenant_id", "workflow_id"],
             ["workflows.tenant_id", "workflows.id"],
@@ -304,6 +309,9 @@ class Run(Base):
     target: Mapped[str] = mapped_column(String(500), nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    approval_eligible: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
     created_by: Mapped[str] = mapped_column(String(36), nullable=False)
     approved_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -318,6 +326,55 @@ class Run(Base):
         default=utc_now,
         onupdate=utc_now,
         server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+
+class OrderSourceClaim(Base):
+    __tablename__ = "order_source_claims"
+    __table_args__ = (
+        CheckConstraint(
+            "source_connector = 'demo_mailbox_v1'",
+            name="ck_order_source_claims_connector",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "run_id"],
+            ["runs.tenant_id", "runs.id"],
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "ai_preparation_id"],
+            ["ai_preparation_operations.tenant_id", "ai_preparation_operations.id"],
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "run_id IS NOT NULL OR ai_preparation_id IS NOT NULL",
+            name="ck_order_source_claims_resource",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "source_connector",
+            "source_ref_hash",
+            name="uq_order_source_claims_source",
+        ),
+        UniqueConstraint("tenant_id", "run_id", name="uq_order_source_claims_run"),
+        UniqueConstraint(
+            "tenant_id",
+            "ai_preparation_id",
+            name="uq_order_source_claims_ai_preparation",
+        ),
+        Index(
+            "ix_order_source_claims_tenant_id_created_at", "tenant_id", "created_at"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_connector: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_ref_hash: Mapped[str] = mapped_column(String(71), nullable=False)
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    ai_preparation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=text("CURRENT_TIMESTAMP")
     )
 
 
@@ -467,6 +524,7 @@ def _reject_run_artifact_update(_mapper: object, _connection: object, target: Ru
         "summary",
         "target",
         "payload",
+        "approval_eligible",
     )
     if any(state.attrs[name].history.has_changes() for name in immutable):
         raise ValueError("run proposal and version snapshots are immutable")
@@ -515,7 +573,7 @@ _sqlite_trigger(
     CREATE TRIGGER runs_immutable_artifacts
     BEFORE UPDATE OF workflow_id, workflow_version_id, agent_version_id,
     workflow_snapshot, agent_snapshot, input_payload, proposal, proposal_hash,
-    summary, target, payload ON runs
+    summary, target, payload, approval_eligible ON runs
     BEGIN SELECT RAISE(ABORT, 'run proposal and version snapshots are immutable'); END
     """,
 )

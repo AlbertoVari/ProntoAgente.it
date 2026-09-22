@@ -6,6 +6,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from prontoagente import models as _models  # noqa: F401
+from prontoagente.ai import models as _ai_models  # noqa: F401
 from prontoagente.config import get_settings
 from prontoagente.db import Base
 from prontoagente.v2 import models as _v2_models  # noqa: F401

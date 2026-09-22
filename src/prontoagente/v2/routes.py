@@ -34,6 +34,7 @@ from prontoagente.v2.connectors import connector_catalog
 from prontoagente.v2.runs import (
     approve_run,
     create_dry_run,
+    create_run_from_mail,
     execute_run,
     get_execution_operation,
     get_run,
@@ -53,6 +54,7 @@ from prontoagente.v2.schemas import (
     PublishRequest,
     RunApprovalRequest,
     RunDryRunRequest,
+    RunFromMailRequest,
     RunRejectionRequest,
     RunResponse,
     V2AuditEventResponse,
@@ -70,6 +72,9 @@ ViewerContext = Annotated[AuthContext, Depends(require_roles(*sorted(ALLOWED_ROL
 BuilderContext = Annotated[AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_BUILDER))]
 OperatorContext = Annotated[
     AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_BUILDER, ROLE_OPERATOR))
+]
+MailPreparerContext = Annotated[
+    AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_OPERATOR))
 ]
 ExecutorContext = Annotated[AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_OPERATOR))]
 ApproverContext = Annotated[AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_APPROVER))]
@@ -221,6 +226,32 @@ def dry_run(
     context: OperatorContext,
 ) -> Any:
     status, body = create_dry_run(
+        session,
+        context,
+        workflow_id=workflow_id,
+        request=payload,
+        idempotency_key=idempotency_key,
+    )
+    return JSONResponse(
+        status_code=status,
+        content=body,
+        headers={"Location": f"/v2/runs/{body['id']}"},
+    )
+
+
+@router.post(
+    "/workflows/{workflow_id}/runs/from-mail",
+    response_model=RunResponse,
+    status_code=201,
+)
+def from_mail(
+    workflow_id: str,
+    payload: RunFromMailRequest,
+    idempotency_key: IdempotencyKey,
+    session: SessionDependency,
+    context: MailPreparerContext,
+) -> Any:
+    status, body = create_run_from_mail(
         session,
         context,
         workflow_id=workflow_id,
