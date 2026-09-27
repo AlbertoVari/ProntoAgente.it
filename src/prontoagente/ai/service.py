@@ -21,8 +21,8 @@ from prontoagente.ai.models import (
 )
 from prontoagente.ai.prompts import (
     EMAIL_ORDER_EXTRACT_V1,
-    get_prompt,
     render_untrusted_email_data,
+    resolve_prompt,
 )
 from prontoagente.ai.schemas import (
     AiPolicyResponse,
@@ -90,9 +90,7 @@ def preparation_body(
     ).model_dump(mode="json")
 
 
-def _current_preparation_body(
-    session: Session, operation: AiPreparationOperation
-) -> ResponseBody:
+def _current_preparation_body(session: Session, operation: AiPreparationOperation) -> ResponseBody:
     invocation = session.scalar(
         select(AiInvocation).where(
             AiInvocation.tenant_id == operation.tenant_id,
@@ -145,9 +143,7 @@ def _validate_deployment_limits(request: AiPolicyUpdate, settings: Settings) -> 
             "ai_policy_exceeds_deployment_cap",
             "AI policy exceeds a deployment hard cap",
         )
-    if request.provider == "fake" and (
-        request.network_enabled or request.model != "fake-pa1-v1"
-    ):
+    if request.provider == "fake" and (request.network_enabled or request.model != "fake-pa1-v1"):
         raise ConflictError(
             "invalid_ai_policy",
             "the offline fake provider requires model fake-pa1-v1 and no network",
@@ -298,9 +294,7 @@ def get_usage(
     ).model_dump(mode="json")
 
 
-def get_preparation(
-    session: Session, context: AuthContext, preparation_id: str
-) -> ResponseBody:
+def get_preparation(session: Session, context: AuthContext, preparation_id: str) -> ResponseBody:
     operation = session.scalar(
         select(AiPreparationOperation).where(
             AiPreparationOperation.tenant_id == context.tenant_id,
@@ -420,9 +414,7 @@ def enqueue_preparation(
             "AI demo preparation is disabled in this environment",
         )
     operation_name = "ai.preparation.create"
-    request_hash = _request_hash(
-        {"workflow_id": workflow_id, **request.model_dump(mode="json")}
-    )
+    request_hash = _request_hash({"workflow_id": workflow_id, **request.model_dump(mode="json")})
     replay = _find_replay(
         session,
         context,
@@ -452,9 +444,7 @@ def enqueue_preparation(
     )
     _validate_deployment_limits(policy_request, resolved)
 
-    workflow, workflow_version, agent_version = _published_stack(
-        session, context, workflow_id
-    )
+    workflow, workflow_version, agent_version = _published_stack(session, context, workflow_id)
     if (
         workflow_version.connector != "simulated_erp"
         or workflow_version.action != "create_sales_order"
@@ -468,15 +458,13 @@ def enqueue_preparation(
         agent_version.definition, policy, resolved
     )
     try:
-        prompt = get_prompt(prompt_id)
+        prompt = resolve_prompt(session, context.tenant_id, prompt_id)
     except ValueError as exc:
         raise ConflictError("prompt_not_allowlisted", "pinned prompt is unavailable") from exc
     if tool_name != prompt.tool_name or tool_name != TOOL_NAME:
         raise ConflictError("tool_not_allowlisted", "pinned tool is unavailable")
     input_rate, output_rate = _pricing(policy.provider, resolved)
-    reserved_cost = _cost(reserved_input, input_rate) + _cost(
-        reserved_output, output_rate
-    )
+    reserved_cost = _cost(reserved_input, input_rate) + _cost(reserved_output, output_rate)
     if reserved_cost > min(policy.max_run_microusd, resolved.ai_hard_max_run_microusd):
         raise ConflictError("ai_run_budget_exceeded", "AI run reservation exceeds its cap")
 
@@ -544,16 +532,12 @@ def enqueue_preparation(
                 + AiUsageBucket.reserved_output_tokens
                 + reserved_output
                 <= min(policy.daily_output_tokens, resolved.ai_hard_daily_output_tokens),
-                AiUsageBucket.used_microusd
-                + AiUsageBucket.reserved_microusd
-                + reserved_cost
+                AiUsageBucket.used_microusd + AiUsageBucket.reserved_microusd + reserved_cost
                 <= min(policy.daily_microusd, resolved.ai_hard_daily_microusd),
             )
             .values(
-                reserved_input_tokens=AiUsageBucket.reserved_input_tokens
-                + reserved_input,
-                reserved_output_tokens=AiUsageBucket.reserved_output_tokens
-                + reserved_output,
+                reserved_input_tokens=AiUsageBucket.reserved_input_tokens + reserved_input,
+                reserved_output_tokens=AiUsageBucket.reserved_output_tokens + reserved_output,
                 reserved_microusd=AiUsageBucket.reserved_microusd + reserved_cost,
                 updated_at=datetime.now(UTC),
             )
@@ -579,6 +563,12 @@ def enqueue_preparation(
         model=policy.model,
         prompt_id=prompt.identifier,
         prompt_hash=prompt.prompt_hash,
+        prompt_snapshot={
+            "name": prompt.name,
+            "version": prompt.version,
+            "system_prompt": prompt.system_prompt,
+            "tool_name": prompt.tool_name,
+        },
         tool_name=tool_name,
         usage_date=usage_date,
         input_token_bound=input_token_bound,
@@ -655,9 +645,7 @@ def enqueue_preparation(
             current = session.get(AiPreparationOperation, replay[1]["id"])
             return (
                 202,
-                replay[1]
-                if current is None
-                else _current_preparation_body(session, current),
+                replay[1] if current is None else _current_preparation_body(session, current),
             )
         claimed = session.scalar(
             select(OrderSourceClaim).where(

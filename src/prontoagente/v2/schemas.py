@@ -45,7 +45,9 @@ class AgentCreate(StrictModel):
 
 
 class AgentAiDefinition(StrictModel):
-    prompt_id: Literal["email_order_extract/v1"]
+    prompt_id: str = Field(
+        min_length=4, max_length=96, pattern=r"^[a-z0-9][a-z0-9_-]*/v[1-9][0-9]*$"
+    )
     tool_name: Literal["demo_erp_reconcile_v1"]
     max_input_tokens: int = Field(ge=1, le=4096)
     max_output_tokens: int = Field(ge=1, le=1024)
@@ -79,6 +81,49 @@ class AgentVersionUpdate(StrictModel):
 
 class PublishRequest(StrictModel):
     lock_version: int = Field(ge=1)
+
+
+class PromptCreate(StrictModel):
+    slug: Slug
+    name: Name
+    description: str = Field(default="", max_length=500)
+
+
+class PromptVersionCreate(StrictModel):
+    system_prompt: str = Field(min_length=1, max_length=8192)
+    tool_name: Literal["demo_erp_reconcile_v1"]
+
+
+class PromptVersionUpdate(PromptVersionCreate):
+    lock_version: int = Field(ge=1)
+
+
+class PromptVersionResponse(BaseModel):
+    id: str
+    prompt_id: str
+    identifier: str
+    version: int
+    status: Literal["draft", "published"]
+    system_prompt: str
+    tool_name: str
+    prompt_hash: str | None
+    lock_version: int
+    created_by: str
+    created_at: datetime
+    published_at: datetime | None
+
+
+class PromptResponse(BaseModel):
+    id: str
+    slug: str
+    name: str
+    description: str
+    created_by: str
+    created_at: datetime
+
+
+class PromptDetailResponse(PromptResponse):
+    versions: list[PromptVersionResponse]
 
 
 class AgentVersionResponse(BaseModel):

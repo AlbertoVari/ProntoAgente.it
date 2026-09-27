@@ -31,6 +31,14 @@ from prontoagente.v2.catalog import (
     update_workflow_version,
 )
 from prontoagente.v2.connectors import connector_catalog
+from prontoagente.v2.prompt_catalog import (
+    create_prompt,
+    create_prompt_version,
+    get_prompt_catalog,
+    list_prompts,
+    publish_prompt_version,
+    update_prompt_version,
+)
 from prontoagente.v2.runs import (
     approve_run,
     create_dry_run,
@@ -51,6 +59,12 @@ from prontoagente.v2.schemas import (
     ConnectorResponse,
     ExecutionOperationResponse,
     MeResponse,
+    PromptCreate,
+    PromptDetailResponse,
+    PromptResponse,
+    PromptVersionCreate,
+    PromptVersionResponse,
+    PromptVersionUpdate,
     PublishRequest,
     RunApprovalRequest,
     RunDryRunRequest,
@@ -73,9 +87,7 @@ BuilderContext = Annotated[AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_B
 OperatorContext = Annotated[
     AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_BUILDER, ROLE_OPERATOR))
 ]
-MailPreparerContext = Annotated[
-    AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_OPERATOR))
-]
+MailPreparerContext = Annotated[AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_OPERATOR))]
 ExecutorContext = Annotated[AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_OPERATOR))]
 ApproverContext = Annotated[AuthContext, Depends(require_roles(ROLE_OWNER, ROLE_APPROVER))]
 IdempotencyKey = Annotated[
@@ -110,6 +122,55 @@ def agents(session: SessionDependency, context: ViewerContext) -> Any:
     return list_agents(session, context)
 
 
+@router.get("/prompts", response_model=list[PromptResponse])
+def prompts(session: SessionDependency, context: ViewerContext) -> Any:
+    return list_prompts(session, context)
+
+
+@router.post("/prompts", response_model=PromptResponse, status_code=201)
+def add_prompt(payload: PromptCreate, session: SessionDependency, context: BuilderContext) -> Any:
+    return create_prompt(session, context, payload)
+
+
+@router.get("/prompts/{prompt_id}", response_model=PromptDetailResponse)
+def prompt(prompt_id: str, session: SessionDependency, context: ViewerContext) -> Any:
+    return get_prompt_catalog(session, context, prompt_id)
+
+
+@router.post("/prompts/{prompt_id}/versions", response_model=PromptVersionResponse, status_code=201)
+def add_prompt_version(
+    prompt_id: str,
+    payload: PromptVersionCreate,
+    session: SessionDependency,
+    context: BuilderContext,
+) -> Any:
+    return create_prompt_version(session, context, prompt_id, payload)
+
+
+@router.patch("/prompts/{prompt_id}/versions/{version_id}", response_model=PromptVersionResponse)
+def edit_prompt_version(
+    prompt_id: str,
+    version_id: str,
+    payload: PromptVersionUpdate,
+    session: SessionDependency,
+    context: BuilderContext,
+) -> Any:
+    return update_prompt_version(session, context, prompt_id, version_id, payload)
+
+
+@router.post(
+    "/prompts/{prompt_id}/versions/{version_id}/publish", response_model=PromptVersionResponse
+)
+def publish_prompt(
+    prompt_id: str,
+    version_id: str,
+    payload: PublishRequest,
+    session: SessionDependency,
+    context: BuilderContext,
+) -> Any:
+    return publish_prompt_version(session, context, prompt_id, version_id, payload)
+
+
 @router.post("/agents", response_model=AgentResponse, status_code=201)
 def add_agent(payload: AgentCreate, session: SessionDependency, context: BuilderContext) -> Any:
     return create_agent(session, context, payload)
@@ -120,9 +181,7 @@ def agent(agent_id: str, session: SessionDependency, context: ViewerContext) -> 
     return get_agent(session, context, agent_id)
 
 
-@router.post(
-    "/agents/{agent_id}/versions", response_model=AgentVersionResponse, status_code=201
-)
+@router.post("/agents/{agent_id}/versions", response_model=AgentVersionResponse, status_code=201)
 def add_agent_version(
     agent_id: str,
     payload: AgentVersionCreate,
@@ -215,9 +274,7 @@ def publish_workflow(
     return publish_workflow_version(session, context, workflow_id, version_id, payload)
 
 
-@router.post(
-    "/workflows/{workflow_id}/runs/dry-run", response_model=RunResponse, status_code=201
-)
+@router.post("/workflows/{workflow_id}/runs/dry-run", response_model=RunResponse, status_code=201)
 def dry_run(
     workflow_id: str,
     payload: RunDryRunRequest,
@@ -306,9 +363,7 @@ def reject(
     return JSONResponse(status_code=status, content=body)
 
 
-@router.post(
-    "/runs/{run_id}/execute", response_model=ExecutionOperationResponse, status_code=202
-)
+@router.post("/runs/{run_id}/execute", response_model=ExecutionOperationResponse, status_code=202)
 def execute(
     run_id: str,
     idempotency_key: IdempotencyKey,
@@ -328,9 +383,7 @@ def execute(
     )
 
 
-@router.get(
-    "/execution-operations/{operation_id}", response_model=ExecutionOperationResponse
-)
+@router.get("/execution-operations/{operation_id}", response_model=ExecutionOperationResponse)
 def execution_operation(
     operation_id: str, session: SessionDependency, context: ViewerContext
 ) -> Any:

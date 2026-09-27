@@ -3,6 +3,8 @@
 from datetime import date, datetime
 
 from sqlalchemy import (
+    DDL,
+    JSON,
     Boolean,
     CheckConstraint,
     Date,
@@ -14,12 +16,25 @@ from sqlalchemy import (
     LargeBinary,
     String,
     UniqueConstraint,
+    event,
+    inspect,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column
 
 from prontoagente.db import Base
 from prontoagente.models import utc_now
+
+
+def _reject_prompt_artifact_update(
+    _mapper: object, _connection: object, target: "AiPreparationOperation"
+) -> None:
+    state = inspect(target)
+    if any(
+        state.attrs[name].history.has_changes()
+        for name in ("prompt_id", "prompt_hash", "prompt_snapshot", "tool_name")
+    ):
+        raise ValueError("preparation prompt snapshot is immutable")
 
 
 class AiTenantPolicy(Base):
@@ -100,9 +115,7 @@ class AiPreparationOperation(Base):
             "status IN ('queued', 'processing', 'completed', 'failed', 'unknown')",
             name="ck_ai_preparations_status",
         ),
-        CheckConstraint(
-            "provider IN ('fake', 'openai')", name="ck_ai_preparations_provider"
-        ),
+        CheckConstraint("provider IN ('fake', 'openai')", name="ck_ai_preparations_provider"),
         CheckConstraint(
             "input_token_bound > 0 AND input_token_bound <= reserved_input_tokens "
             "AND reserved_input_tokens > 0 AND reserved_output_tokens > 0 "
@@ -134,9 +147,7 @@ class AiPreparationOperation(Base):
             ["runs.tenant_id", "runs.id"],
             ondelete="RESTRICT",
         ),
-        UniqueConstraint(
-            "tenant_id", "id", name="uq_ai_preparations_tenant_id_id"
-        ),
+        UniqueConstraint("tenant_id", "id", name="uq_ai_preparations_tenant_id_id"),
         UniqueConstraint("correlation_id", name="uq_ai_preparations_correlation"),
         Index(
             "ix_ai_preparations_tenant_id_status_created_at",
@@ -161,6 +172,7 @@ class AiPreparationOperation(Base):
     model: Mapped[str] = mapped_column(String(128), nullable=False)
     prompt_id: Mapped[str] = mapped_column(String(96), nullable=False)
     prompt_hash: Mapped[str] = mapped_column(String(71), nullable=False)
+    prompt_snapshot: Mapped[dict[str, str] | None] = mapped_column(JSON, nullable=True)
     tool_name: Mapped[str] = mapped_column(String(96), nullable=False)
     usage_date: Mapped[date] = mapped_column(Date, nullable=False)
     input_token_bound: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -179,9 +191,7 @@ class AiPreparationOperation(Base):
         DateTime(timezone=True), default=utc_now, server_default=text("CURRENT_TIMESTAMP")
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    completed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class AiOutboxEvent(Base):
@@ -197,9 +207,7 @@ class AiOutboxEvent(Base):
             ["ai_preparation_operations.tenant_id", "ai_preparation_operations.id"],
             ondelete="RESTRICT",
         ),
-        UniqueConstraint(
-            "tenant_id", "preparation_id", name="uq_ai_outbox_preparation"
-        ),
+        UniqueConstraint("tenant_id", "preparation_id", name="uq_ai_outbox_preparation"),
         Index(
             "ix_ai_outbox_tenant_id_status_available_at",
             "tenant_id",
@@ -240,9 +248,7 @@ class AiInvocation(Base):
             ["ai_preparation_operations.tenant_id", "ai_preparation_operations.id"],
             ondelete="RESTRICT",
         ),
-        UniqueConstraint(
-            "tenant_id", "preparation_id", name="uq_ai_invocations_preparation"
-        ),
+        UniqueConstraint("tenant_id", "preparation_id", name="uq_ai_invocations_preparation"),
         Index("ix_ai_invocations_tenant_id_created_at", "tenant_id", "created_at"),
     )
 
@@ -266,3 +272,16 @@ class AiInvocation(Base):
         DateTime(timezone=True), default=utc_now, server_default=text("CURRENT_TIMESTAMP")
     )
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+event.listen(AiPreparationOperation, "before_update", _reject_prompt_artifact_update)
+event.listen(
+    AiPreparationOperation.__table__,
+    "after_create",
+    DDL("""CREATE TRIGGER ai_preparations_immutable_prompt
+    BEFORE UPDATE OF prompt_id, prompt_hash, prompt_snapshot, tool_name
+    ON ai_preparation_operations
+    BEGIN SELECT RAISE(ABORT, 'preparation prompt snapshot is immutable'); END""").execute_if(  # type: ignore[no-untyped-call]
+        dialect="sqlite"
+    ),
+)
