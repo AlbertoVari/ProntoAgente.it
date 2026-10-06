@@ -360,6 +360,18 @@ rete. Un golden test blocca regressioni di schema e hash v1.
 
 ## Qualità e migrazioni
 
+Per verificare i trigger di `0005_prompt_catalog` su PostgreSQL reale è disponibile
+uno smoke test **manuale e opt-in**, separato da pytest e dalla CI:
+`uv run python scripts/smoke_postgres.py --confirm-disposable-database`.
+Richiede un database nuovo usa e getta, dipendenze `--extra postgres` e
+`POSTGRES_SMOKE_DATABASE_URL` fornita in modo riservato. Il flag conferma esplicitamente
+le migrazioni e gli inserimenti. Esegue `alembic upgrade head`, `alembic check`,
+guardie SQL dirette su versioni pubblicate e snapshot delle preparazioni, e la race
+di pubblicazione con due sessioni concorrenti. Produce solo PASS/FAIL sanitizzati.
+Prerequisiti, criteri di successo, limiti e pulizia sono nel
+[runbook PostgreSQL](docs/runbook-postgres-smoke.md).
+La disponibilità dello script non implica che sia già stato eseguito su un server live.
+
 ```bash
 uv run pytest
 uv run ruff check .
