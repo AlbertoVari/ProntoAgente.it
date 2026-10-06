@@ -24,7 +24,7 @@ from prontoagente.ai.models import (
     AiTenantPolicy,
     AiUsageBucket,
 )
-from prontoagente.ai.prompts import get_prompt, render_untrusted_email_data
+from prontoagente.ai.prompts import _prompt, get_prompt, render_untrusted_email_data
 from prontoagente.ai.providers import build_provider
 from prontoagente.ai.schemas import AiPreparationRequest
 from prontoagente.ai.service import preparation_body
@@ -76,6 +76,7 @@ class WorkItem:
     model: str
     prompt_id: str
     prompt_hash: str
+    prompt_snapshot: dict[str, str] | None
     tool_name: str
     input_token_bound: int
     reserved_input_tokens: int
@@ -229,8 +230,7 @@ def _claim_one(
             prompt_id=operation.prompt_id,
             prompt_hash=operation.prompt_hash,
             tool_name=operation.tool_name,
-            input_hash="sha256:"
-            + hashlib.sha256(bytes(operation.sealed_input)).hexdigest(),
+            input_hash="sha256:" + hashlib.sha256(bytes(operation.sealed_input)).hexdigest(),
         )
     )
     _audit(
@@ -293,6 +293,7 @@ def _load_work(
                 model=operation.model,
                 prompt_id=operation.prompt_id,
                 prompt_hash=operation.prompt_hash,
+                prompt_snapshot=operation.prompt_snapshot,
                 tool_name=operation.tool_name,
                 input_token_bound=operation.input_token_bound,
                 reserved_input_tokens=operation.reserved_input_tokens,
@@ -399,10 +400,8 @@ def _settle_usage(
             .where(
                 AiUsageBucket.tenant_id == operation.tenant_id,
                 AiUsageBucket.usage_date == operation.usage_date,
-                AiUsageBucket.reserved_input_tokens
-                >= operation.reserved_input_tokens,
-                AiUsageBucket.reserved_output_tokens
-                >= operation.reserved_output_tokens,
+                AiUsageBucket.reserved_input_tokens >= operation.reserved_input_tokens,
+                AiUsageBucket.reserved_output_tokens >= operation.reserved_output_tokens,
                 AiUsageBucket.reserved_microusd >= operation.reserved_microusd,
             )
             .values(
@@ -410,8 +409,7 @@ def _settle_usage(
                 - operation.reserved_input_tokens,
                 reserved_output_tokens=AiUsageBucket.reserved_output_tokens
                 - operation.reserved_output_tokens,
-                reserved_microusd=AiUsageBucket.reserved_microusd
-                - operation.reserved_microusd,
+                reserved_microusd=AiUsageBucket.reserved_microusd - operation.reserved_microusd,
                 used_input_tokens=AiUsageBucket.used_input_tokens + input_tokens,
                 used_output_tokens=AiUsageBucket.used_output_tokens + output_tokens,
                 used_microusd=AiUsageBucket.used_microusd + cost_microusd,
@@ -766,12 +764,21 @@ def process_once(
             encoded_key=resolved.ai_encryption_key,
         )
         payload = AiPreparationRequest.model_validate(sealed)
-        prompt = get_prompt(work.prompt_id)
+        if work.prompt_snapshot is None:
+            prompt = get_prompt(work.prompt_id)  # preparations created before the migration
+        else:
+            snapshot = work.prompt_snapshot
+            prompt = _prompt(
+                name=snapshot["name"],
+                version=snapshot["version"],
+                system_prompt=snapshot["system_prompt"],
+                tool_name=snapshot["tool_name"],
+            )
+            if prompt.identifier != work.prompt_id:
+                raise ProviderFailure("pinned_prompt_mismatch", outcome_unknown=False)
         if prompt.prompt_hash != work.prompt_hash or prompt.tool_name != work.tool_name:
             raise ProviderFailure("pinned_prompt_mismatch", outcome_unknown=False)
-        user_data = render_untrusted_email_data(
-            payload.envelope.model_dump(mode="json")
-        )
+        user_data = render_untrusted_email_data(payload.envelope.model_dump(mode="json"))
         input_token_bound = provider_input_token_upper_bound(
             system_prompt=prompt.system_prompt,
             user_data=user_data,

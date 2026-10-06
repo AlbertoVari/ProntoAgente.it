@@ -8,11 +8,13 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from prontoagente.ai.prompts import resolve_prompt
 from prontoagente.errors import ConflictError, NotFoundError
 from prontoagente.v2.auth import AuthContext
 from prontoagente.v2.connectors import validate_connector_action, validate_public_config
 from prontoagente.v2.models import Agent, AgentVersion, Workflow, WorkflowVersion
 from prontoagente.v2.schemas import (
+    AgentAiDefinition,
     AgentCreate,
     AgentDetailResponse,
     AgentResponse,
@@ -118,9 +120,7 @@ def _agent_version(
 
 def _workflow(session: Session, context: AuthContext, workflow_id: str) -> Workflow:
     workflow = session.scalar(
-        select(Workflow).where(
-            Workflow.tenant_id == context.tenant_id, Workflow.id == workflow_id
-        )
+        select(Workflow).where(Workflow.tenant_id == context.tenant_id, Workflow.id == workflow_id)
     )
     if workflow is None:
         raise NotFoundError("workflow_not_found", "workflow not found")
@@ -184,6 +184,7 @@ def create_agent_version(
     session: Session, context: AuthContext, agent_id: str, request: AgentVersionCreate
 ) -> dict[str, Any]:
     _agent(session, context, agent_id)
+    _validate_agent_prompt(session, context, request.definition)
     current = session.scalar(
         select(func.max(AgentVersion.version)).where(
             AgentVersion.tenant_id == context.tenant_id, AgentVersion.agent_id == agent_id
@@ -221,6 +222,7 @@ def update_agent_version(
         raise ConflictError("published_version_immutable", "published versions are immutable")
     if version.lock_version != request.lock_version:
         raise ConflictError("optimistic_lock_conflict", "agent version changed; reload and retry")
+    _validate_agent_prompt(session, context, request.definition)
     version.definition = request.definition
     session.commit()
     return agent_version_body(version)
@@ -238,10 +240,26 @@ def publish_agent_version(
         raise ConflictError("published_version_immutable", "published versions are immutable")
     if version.lock_version != request.lock_version:
         raise ConflictError("optimistic_lock_conflict", "agent version changed; reload and retry")
+    _validate_agent_prompt(session, context, version.definition)
     version.status = "published"
     version.published_at = datetime.now(UTC)
     session.commit()
     return agent_version_body(version)
+
+
+def _validate_agent_prompt(
+    session: Session, context: AuthContext, definition: dict[str, Any]
+) -> None:
+    raw = definition.get("ai")
+    if raw is None:
+        return
+    ai = AgentAiDefinition.model_validate(raw)
+    try:
+        prompt = resolve_prompt(session, context.tenant_id, ai.prompt_id)
+    except ValueError as exc:
+        raise ConflictError("prompt_not_published", "published tenant prompt not found") from exc
+    if prompt.tool_name != ai.tool_name:
+        raise ConflictError("tool_not_allowlisted", "pinned tool does not match prompt")
 
 
 def list_workflows(session: Session, context: AuthContext) -> list[dict[str, Any]]:

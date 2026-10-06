@@ -110,7 +110,7 @@ Le etichette descrivono il perimetro di ciascuna milestone, non KPI di efficacia
 | Catalogo Agent/Workflow versionato | Fuori scope | **Completo** | **Completo**, riusato da M2 |
 | Auth, tenancy e RBAC | Fuori scope | **Completo** | **Completo**, riusato da M2 |
 | Provider LLM | Fuori scope | Fuori scope | **Limitato**: fake offline e OpenAI opt-in, non-production e non testato live |
-| Prompt versionati | Fuori scope | Fuori scope | **Limitato**: un prompt identificato e hashato, immutabile a runtime nel registry in-code |
+| Prompt versionati | Fuori scope | Fuori scope | **Catalogo tenant-scoped**: draft/publish immutabile, hash e snapshot per le preparazioni; tool demo fisso |
 | Tool calling governato | Fuori scope | Fuori scope | **Limitato**: un solo tool fisso, forced e read-only; nessun registry o gate dedicato |
 | Validazione output | **Completo** nel contratto M1 | **Completo** per gli input deterministici M2 | **Verificata nel contratto fisso**: tool schema strict, modelli Pydantic strict `extra=forbid` e regole business; resta limitata a un solo prompt/tool |
 | Budget e cost control | Fuori scope | Fuori scope | **Verificato nel perimetro fisso**: bound conservativo pre-I/O rispetto alla reservation; l'eventuale usage provider oltre reservation è contabilizzato e fallisce chiuso. Ledger operativo, non billing né previsione esatta del costo provider |
@@ -258,9 +258,16 @@ Il provider viene quindi invocato durante la preparazione, prima che esista un R
 approvare. L'intero percorso M3 è disabilitato quando `APP_ENV=production`, anche con i
 flag impostati; questa release è esclusivamente un prototipo locale.
 
-Il prompt in-code `email_order_extract/v1` separa system prompt e metadata email non
-attendibili, è identificato e hashato ed è immutabile a runtime nel registry. Non esiste
-ancora un catalogo prompt persistente con lifecycle draft/publish. L'unico tool è
+Il prompt storico `email_order_extract/v1` resta disponibile e mantiene il suo hash.
+Il catalogo persistente `/v2/prompts` è isolato per tenant: builder e owner creano
+prompt e versioni draft, le modificano con `lock_version` e le pubblicano con
+`POST /v2/prompts/{id}/versions/{version_id}/publish`. Ogni versione pubblicata ha
+identificatore `{slug}/v{numero}` e hash del contenuto; non può essere modificata.
+Le versioni Agent possono riferirsi solo a prompt pubblicati dello stesso tenant o
+al prompt storico. Ogni preparazione salva hash e snapshot del prompt, così il worker
+usa il testo originario anche dopo la creazione di versioni successive. Le preparazioni
+antecedenti alla migrazione usano il prompt storico. I metadata email restano dati non
+attendibili separati dal system prompt. L'unico tool consentito resta
 `demo_erp_reconcile_v1`, con JSON Schema strict e output Pydantic `extra=forbid`; il
 modello determina i campi dell'ordine proposto, ma non connector, action, target né le
 decisioni di approvazione/esecuzione. L'orchestratore ricostruisce sempre il payload
@@ -319,9 +326,8 @@ OCR, mailbox reale e scrittura ERP reale restano fuori scope. L'adapter OpenAI n
 abilitato dal demo script e richiede una revisione deployment-specific di endpoint,
 allowlist, pricing e retention prima dell'uso.
 
-Per un pilot restano inoltre da introdurre un secondo gate operativo per l'abilitazione
-rete/provider e un catalogo prompt persistente con lifecycle: non fanno parte di questa
-slice, che mantiene un solo prompt/tool fisso in codice.
+Per un pilot resta da introdurre un secondo gate operativo per l'abilitazione
+rete/provider. Il catalogo permette versioni persistenti con il tool fisso del demo.
 
 ## Connector Microsoft 365 read-only
 
@@ -353,6 +359,18 @@ Il flusso legacy resta dry-run → approve/reject → simulate, con `Idempotency
 rete. Un golden test blocca regressioni di schema e hash v1.
 
 ## Qualità e migrazioni
+
+Per verificare i trigger di `0005_prompt_catalog` su PostgreSQL reale è disponibile
+uno smoke test **manuale e opt-in**, separato da pytest e dalla CI:
+`uv run python scripts/smoke_postgres.py --confirm-disposable-database`.
+Richiede un database nuovo usa e getta, dipendenze `--extra postgres` e
+`POSTGRES_SMOKE_DATABASE_URL` fornita in modo riservato. Il flag conferma esplicitamente
+le migrazioni e gli inserimenti. Esegue `alembic upgrade head`, `alembic check`,
+guardie SQL dirette su versioni pubblicate e snapshot delle preparazioni, e la race
+di pubblicazione con due sessioni concorrenti. Produce solo PASS/FAIL sanitizzati.
+Prerequisiti, criteri di successo, limiti e pulizia sono nel
+[runbook PostgreSQL](docs/runbook-postgres-smoke.md).
+La disponibilità dello script non implica che sia già stato eseguito su un server live.
 
 ```bash
 uv run pytest

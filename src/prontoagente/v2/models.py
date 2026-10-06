@@ -113,6 +113,65 @@ class Agent(Base):
     )
 
 
+class Prompt(Base):
+    __tablename__ = "prompts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "created_by"],
+            ["principals.tenant_id", "principals.id"],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("tenant_id", "slug", name="uq_prompts_tenant_slug"),
+        UniqueConstraint("tenant_id", "id", name="uq_prompts_tenant_id_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    slug: Mapped[str] = mapped_column(String(80), nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    description: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    created_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=text("CURRENT_TIMESTAMP")
+    )
+
+
+class PromptVersion(Base):
+    __tablename__ = "prompt_versions"
+    __table_args__ = (
+        CheckConstraint("status IN ('draft', 'published')", name="ck_prompt_versions_status"),
+        ForeignKeyConstraint(
+            ["tenant_id", "prompt_id"], ["prompts.tenant_id", "prompts.id"], ondelete="RESTRICT"
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "created_by"],
+            ["principals.tenant_id", "principals.id"],
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint("tenant_id", "prompt_id", "version", name="uq_prompt_versions_number"),
+        UniqueConstraint("tenant_id", "id", name="uq_prompt_versions_tenant_id_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")
+    system_prompt: Mapped[str] = mapped_column(String(8192), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(96), nullable=False)
+    prompt_hash: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(36), nullable=False)
+    lock_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, server_default=text("CURRENT_TIMESTAMP")
+    )
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __mapper_args__ = {"version_id_col": lock_version}
+
+
 class AgentVersion(Base):
     __tablename__ = "agent_versions"
     __table_args__ = (
@@ -127,9 +186,7 @@ class AgentVersion(Base):
             ["principals.tenant_id", "principals.id"],
             ondelete="RESTRICT",
         ),
-        UniqueConstraint(
-            "tenant_id", "agent_id", "version", name="uq_agent_versions_number"
-        ),
+        UniqueConstraint("tenant_id", "agent_id", "version", name="uq_agent_versions_number"),
         UniqueConstraint("tenant_id", "id", name="uq_agent_versions_tenant_id_id"),
         Index("ix_agent_versions_tenant_id_agent_id", "tenant_id", "agent_id"),
     )
@@ -179,9 +236,7 @@ class Workflow(Base):
 class WorkflowVersion(Base):
     __tablename__ = "workflow_versions"
     __table_args__ = (
-        CheckConstraint(
-            "status IN ('draft', 'published')", name="ck_workflow_versions_status"
-        ),
+        CheckConstraint("status IN ('draft', 'published')", name="ck_workflow_versions_status"),
         CheckConstraint(
             "connector IN ('simulated_erp', 'm365_mail_intake_v1')",
             name="ck_workflow_versions_connector",
@@ -190,9 +245,7 @@ class WorkflowVersion(Base):
             "action IN ('create_sales_order', 'list_messages')",
             name="ck_workflow_versions_action",
         ),
-        CheckConstraint(
-            "approval_required", name="ck_workflow_versions_approval_required"
-        ),
+        CheckConstraint("approval_required", name="ck_workflow_versions_approval_required"),
         ForeignKeyConstraint(
             ["tenant_id", "workflow_id"],
             ["workflows.tenant_id", "workflows.id"],
@@ -208,9 +261,7 @@ class WorkflowVersion(Base):
             ["principals.tenant_id", "principals.id"],
             ondelete="RESTRICT",
         ),
-        UniqueConstraint(
-            "tenant_id", "workflow_id", "version", name="uq_workflow_versions_number"
-        ),
+        UniqueConstraint("tenant_id", "workflow_id", "version", name="uq_workflow_versions_number"),
         UniqueConstraint("tenant_id", "id", name="uq_workflow_versions_tenant_id_id"),
         Index("ix_workflow_versions_tenant_id_workflow_id", "tenant_id", "workflow_id"),
     )
@@ -362,9 +413,7 @@ class OrderSourceClaim(Base):
             "ai_preparation_id",
             name="uq_order_source_claims_ai_preparation",
         ),
-        Index(
-            "ix_order_source_claims_tenant_id_created_at", "tenant_id", "created_at"
-        ),
+        Index("ix_order_source_claims_tenant_id_created_at", "tenant_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -530,13 +579,13 @@ def _reject_run_artifact_update(_mapper: object, _connection: object, target: Ru
         raise ValueError("run proposal and version snapshots are immutable")
 
 
-def _reject_v2_audit_mutation(
-    _mapper: object, _connection: object, _target: V2AuditEvent
-) -> None:
+def _reject_v2_audit_mutation(_mapper: object, _connection: object, _target: V2AuditEvent) -> None:
     raise ValueError("v2 audit events are append-only")
 
 
 event.listen(AgentVersion, "before_update", _reject_published_update)
+event.listen(PromptVersion, "before_update", _reject_published_update)
+event.listen(PromptVersion, "before_delete", _reject_published_update)
 event.listen(WorkflowVersion, "before_update", _reject_published_update)
 event.listen(Run, "before_update", _reject_run_artifact_update)
 event.listen(V2AuditEvent, "before_update", _reject_v2_audit_mutation)
@@ -556,6 +605,22 @@ _sqlite_trigger(
     """
     CREATE TRIGGER agent_versions_published_immutable
     BEFORE UPDATE ON agent_versions WHEN OLD.status = 'published'
+    BEGIN SELECT RAISE(ABORT, 'published versions are immutable'); END
+    """,
+)
+_sqlite_trigger(
+    PromptVersion.__table__,
+    """
+    CREATE TRIGGER prompt_versions_published_immutable
+    BEFORE UPDATE ON prompt_versions WHEN OLD.status = 'published'
+    BEGIN SELECT RAISE(ABORT, 'published versions are immutable'); END
+    """,
+)
+_sqlite_trigger(
+    PromptVersion.__table__,
+    """
+    CREATE TRIGGER prompt_versions_published_no_delete
+    BEFORE DELETE ON prompt_versions WHEN OLD.status = 'published'
     BEGIN SELECT RAISE(ABORT, 'published versions are immutable'); END
     """,
 )

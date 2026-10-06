@@ -49,13 +49,9 @@ from prontoagente.v2.models import (
     V2AuditEvent,
 )
 
-MATCH_SUBJECT = (
-    "PA1;order=PO-1001;customer=CUST-42;currency=EUR;"
-    "lines=SKU-A:2:49.90,SKU-B:1:10.00"
-)
+MATCH_SUBJECT = "PA1;order=PO-1001;customer=CUST-42;currency=EUR;lines=SKU-A:2:49.90,SKU-B:1:10.00"
 MISMATCH_SUBJECT = (
-    "PA1;order=PO-1002;customer=CUST-42;currency=EUR;"
-    "lines=SKU-A:2:49.90,SKU-B:1:10.00"
+    "PA1;order=PO-1002;customer=CUST-42;currency=EUR;lines=SKU-A:2:49.90,SKU-B:1:10.00"
 )
 
 
@@ -101,9 +97,7 @@ def create_identity(
         )
         session.add(principal)
         session.flush()
-        _record, token = create_api_key(
-            session, tenant_id=tenant.id, principal_id=principal.id
-        )
+        _record, token = create_api_key(session, tenant_id=tenant.id, principal_id=principal.id)
         session.commit()
         return Identity(tenant.id, principal.id, token)
 
@@ -160,8 +154,7 @@ def publish_stack(client: TestClient, identity: Identity, *, marker: str) -> str
     )
     assert workflow_version.status_code == 201, workflow_version.text
     published_workflow = client.post(
-        f"/v2/workflows/{workflow.json()['id']}/versions/"
-        f"{workflow_version.json()['id']}/publish",
+        f"/v2/workflows/{workflow.json()['id']}/versions/{workflow_version.json()['id']}/publish",
         headers=auth(identity),
         json={"lock_version": workflow_version.json()["lock_version"]},
     )
@@ -319,9 +312,7 @@ def test_openai_adapter_sends_one_strict_forced_tool() -> None:
     response = provider.invoke(request)
     provider.close()
     assert response.usage.input_tokens == 50
-    assert [(item.method, item.url.host) for item in seen] == [
-        ("POST", "api.openai.com")
-    ]
+    assert [(item.method, item.url.host) for item in seen] == [("POST", "api.openai.com")]
 
 
 def test_ai_fake_e2e_creates_governed_run_and_settles_budget(
@@ -349,15 +340,11 @@ def test_ai_fake_e2e_creates_governed_run_and_settles_budget(
         assert session.scalar(select(func.count()).select_from(AiOutboxEvent)) == 1
 
     assert process_once(session_factory, settings=ai_settings, worker_id="worker-e2e")
-    operation = client.get(
-        f"/v2/ai-preparations/{preparation_id}", headers=auth(owner)
-    )
+    operation = client.get(f"/v2/ai-preparations/{preparation_id}", headers=auth(owner))
     assert operation.status_code == 200
     assert operation.json()["status"] == "completed"
     assert operation.json()["result_run_id"] is not None
-    run = client.get(
-        f"/v2/runs/{operation.json()['result_run_id']}", headers=auth(owner)
-    )
+    run = client.get(f"/v2/runs/{operation.json()['result_run_id']}", headers=auth(owner))
     assert run.status_code == 200, run.text
     assert run.json()["approval_eligible"] is True
     assert run.json()["proposal"]["reconciliation"]["outcome"] == "MATCHED"
@@ -377,9 +364,12 @@ def test_ai_fake_e2e_creates_governed_run_and_settles_budget(
     with session_factory() as session:
         operation_row = session.get(AiPreparationOperation, preparation_id)
         assert operation_row is not None
-        bucket = session.get(
-            AiUsageBucket, (owner.tenant_id, operation_row.usage_date)
+        assert operation_row.prompt_snapshot is not None
+        assert (
+            operation_row.prompt_snapshot["system_prompt"] == EMAIL_ORDER_EXTRACT_V1.system_prompt
         )
+        assert operation_row.prompt_hash == EMAIL_ORDER_EXTRACT_V1.prompt_hash
+        bucket = session.get(AiUsageBucket, (owner.tenant_id, operation_row.usage_date))
         assert bucket is not None
         assert bucket.reserved_input_tokens == 0
         assert bucket.reserved_output_tokens == 0
@@ -391,18 +381,14 @@ def test_ai_fake_e2e_creates_governed_run_and_settles_budget(
         )
         assert invocation is not None and invocation.status == "completed"
         claim = session.scalar(
-            select(OrderSourceClaim).where(
-                OrderSourceClaim.ai_preparation_id == preparation_id
-            )
+            select(OrderSourceClaim).where(OrderSourceClaim.ai_preparation_id == preparation_id)
         )
         assert claim is not None and claim.run_id == operation_row.result_run_id
         audit_text = str(
             [
                 event.payload
                 for event in session.scalars(
-                    select(V2AuditEvent).where(
-                        V2AuditEvent.entity_type == "ai_preparation"
-                    )
+                    select(V2AuditEvent).where(V2AuditEvent.entity_type == "ai_preparation")
                 )
             ]
         )
@@ -494,9 +480,7 @@ def test_cross_tenant_ai_operation_is_hidden(
         mail=envelope("tenant-a"),
     )
     assert queued.status_code == 202
-    hidden = client.get(
-        f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(outsider)
-    )
+    hidden = client.get(f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(outsider))
     assert hidden.status_code == 404
     assert ai_settings.ai_network_enabled is False
 
@@ -598,9 +582,7 @@ def test_prompt_injection_like_subject_fails_without_run_or_execution_outbox(
     )
     assert queued.status_code == 202, queued.text
     assert process_once(session_factory, settings=ai_settings, worker_id="worker-injection")
-    result = client.get(
-        f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)
-    )
+    result = client.get(f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner))
     assert result.json()["status"] == "failed"
     assert result.json()["error_code"] == "fake_input_invalid"
     with session_factory() as session:
@@ -609,9 +591,7 @@ def test_prompt_injection_like_subject_fails_without_run_or_execution_outbox(
         serialized = str(
             list(
                 session.scalars(
-                    select(V2AuditEvent).where(
-                        V2AuditEvent.entity_type == "ai_preparation"
-                    )
+                    select(V2AuditEvent).where(V2AuditEvent.entity_type == "ai_preparation")
                 )
             )
         )
@@ -683,9 +663,7 @@ def test_hostile_provider_cannot_coerce_tool_arguments(
         provider_factory=lambda _name: provider,
         worker_id="worker-coercion",
     )
-    result = client.get(
-        f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)
-    ).json()
+    result = client.get(f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)).json()
     assert provider.call_count == 1
     assert result["status"] == "failed"
     assert result["error_code"] == "tool_arguments_invalid"
@@ -781,9 +759,7 @@ def test_provider_usage_overage_is_accounted_and_blocks_future_spend(
         provider_factory=lambda _name: provider,
         worker_id="worker-overage",
     )
-    result = client.get(
-        f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)
-    ).json()
+    result = client.get(f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)).json()
     assert result["status"] == "failed"
     assert result["error_code"] == "provider_usage_exceeded_reservation"
     assert result["input_tokens"] == 10_000
@@ -829,9 +805,7 @@ def test_tool_escalation_fails_closed_after_one_provider_call(
         provider_factory=lambda _name: provider,
         worker_id="worker-escalation",
     )
-    result = client.get(
-        f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)
-    ).json()
+    result = client.get(f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)).json()
     assert result["status"] == "failed"
     assert result["error_code"] == "tool_not_allowlisted"
     assert result["input_tokens"] == 10
@@ -901,9 +875,7 @@ def test_worker_lease_fencing_and_invocation_dedupe_prevent_second_spend(
         worker_id="replacement-worker",
     )
     assert provider.call_count == 1
-    result = client.get(
-        f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)
-    ).json()
+    result = client.get(f"/v2/ai-preparations/{queued.json()['id']}", headers=auth(owner)).json()
     assert result["status"] == "unknown"
     assert result["error_code"] == "prior_invocation_outcome_unknown"
 
@@ -964,9 +936,7 @@ def test_reclaimed_generation_stops_stale_worker_before_provider_io(
     assert provider.call_count == 0
     with session_factory() as session:
         outbox = session.scalar(
-            select(AiOutboxEvent).where(
-                AiOutboxEvent.preparation_id == queued.json()["id"]
-            )
+            select(AiOutboxEvent).where(AiOutboxEvent.preparation_id == queued.json()["id"])
         )
         assert outbox is not None
         assert outbox.claim_version == 2
@@ -1166,9 +1136,7 @@ def test_daily_budget_reservation_is_atomic_under_race(
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(submit, ("a", "b")))
     assert sorted(status for status, _code in results) == [202, 409]
-    assert {code for status, code in results if status == 409} == {
-        "ai_daily_budget_exceeded"
-    }
+    assert {code for status, code in results if status == 409} == {"ai_daily_budget_exceeded"}
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AiPreparationOperation)) == 1
         bucket = session.scalar(
@@ -1206,9 +1174,7 @@ def test_source_claim_race_creates_only_one_preparation(
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(submit, ("a", "b")))
     assert sorted(status for status, _code in results) == [202, 409]
-    assert {code for status, code in results if status == 409} == {
-        "order_source_already_claimed"
-    }
+    assert {code for status, code in results if status == 409} == {"order_source_already_claimed"}
     with session_factory() as session:
         assert session.scalar(select(func.count()).select_from(AiPreparationOperation)) == 1
         assert session.scalar(select(func.count()).select_from(OrderSourceClaim)) == 1
@@ -1254,9 +1220,7 @@ def test_openapi_exposes_async_contract_without_sealed_or_secret_fields(
     document = client.get("/openapi.json").json()
     path = "/v2/workflows/{workflow_id}/runs/from-mail/llm"
     assert document["paths"][path]["post"]["responses"]["202"]
-    operation_properties = document["components"]["schemas"][
-        "AiPreparationResponse"
-    ]["properties"]
+    operation_properties = document["components"]["schemas"]["AiPreparationResponse"]["properties"]
     assert "correlation_id" in operation_properties
     assert "prompt_hash" in operation_properties
     assert "input_hash" in operation_properties
